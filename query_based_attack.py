@@ -10,12 +10,14 @@ from keras.utils import np_utils
 from attack_utils import gen_grad
 import time
 from os.path import basename
+from numpy import ma
 
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 
 RANDOM = True
 BATCH_SIZE = 100
+ROUND_PARAM = 100.0
 
 K.set_learning_phase(0)
 
@@ -43,27 +45,51 @@ def pca_components(X, dim):
 
     return U_norm[:,:args.num_comp]
 
+def round_array(array, divider):
+    array = divider * array
+    array = array.astype(int)
+    array = array/divider
+
+    return array
+
 
 def xent_est(prediction, x, x_plus_i, x_minus_i, curr_target):
     pred_plus = sess.run(prediction, feed_dict={x: x_plus_i})
+    if args.round_counter:
+        pred_plus = round_array(pred_plus, ROUND_PARAM)
     pred_plus_t = pred_plus[np.arange(BATCH_SIZE), list(curr_target)]
     pred_minus = sess.run(prediction, feed_dict={x: x_minus_i})
+    if args.round_counter:
+        pred_minus = round_array(pred_minus, ROUND_PARAM)
     pred_minus_t = pred_minus[np.arange(BATCH_SIZE), list(curr_target)]
     single_grad_est = (pred_plus_t - pred_minus_t)/args.delta
 
     return single_grad_est/2.0
 
-def CW_est(logits, x, x_plus_i, x_minus_i, curr_sample, curr_target):
-    curr_logits = sess.run(logits, feed_dict={x: curr_sample})
+def CW_est(prediction, logits, x, x_plus_i, x_minus_i, curr_sample, curr_target):
+    # curr_logits = sess.run(logits, feed_dict={x: curr_sample})
+    curr_prediction = sess.run(prediction, feed_dict={x: curr_sample})
+    if args.round_counter:
+        curr_prediction = round_array(curr_prediction, ROUND_PARAM)
+    curr_logits = (ma.log(curr_prediction)).filled(0)
     # So that when max is taken, it returns max among classes apart from the
     # target
     curr_logits[np.arange(BATCH_SIZE), list(curr_target)] = -1e4
     max_indices = np.argmax(curr_logits, 1)
-    logit_plus = sess.run(logits, feed_dict={x: x_plus_i})
+
+    # logit_plus = sess.run(logits, feed_dict={x: x_plus_i})
+    prediction_plus = sess.run(prediction, feed_dict={x: x_plus_i})
+    if args.round_counter:
+        prediction_plus = round_array(prediction_plus, ROUND_PARAM)
+    logit_plus = (ma.log(prediction_plus)).filled(0)
     logit_plus_t = logit_plus[np.arange(BATCH_SIZE), list(curr_target)]
     logit_plus_max = logit_plus[np.arange(BATCH_SIZE), list(max_indices)]
 
-    logit_minus = sess.run(logits, feed_dict={x: x_minus_i})
+    prediction_minus = sess.run(prediction, feed_dict={x: x_minus_i})
+    if args.round_counter:
+        prediction_minus = round_array(prediction_minus, ROUND_PARAM)
+    logit_minus = (ma.log(prediction_minus)).filled(0)
+    # logit_minus = sess.run(logits, feed_dict={x: x_minus_i})
     logit_minus_t = logit_minus[np.arange(BATCH_SIZE), list(curr_target)]
     logit_minus_max = logit_minus[np.arange(BATCH_SIZE), list(max_indices)]
 
@@ -96,7 +122,7 @@ def overall_grad_est(j, logits, prediction, x, curr_sample, curr_target,
     x_minus_i = np.clip(curr_sample - args.delta * basis_vec, CLIP_MIN, CLIP_MAX)
 
     if args.loss_type == 'cw':
-        logit_t_grad_est, logit_max_grad_est = CW_est(logits, x, x_plus_i,
+        logit_t_grad_est, logit_max_grad_est = CW_est(prediction, logits, x, x_plus_i,
                                         x_minus_i, curr_sample, curr_target)
         if '_un' in args.method:
             single_grad_est = logit_t_grad_est - logit_max_grad_est
@@ -128,7 +154,12 @@ def loss_grad_fn(grad_est, p_t, logits_np, curr_target):
 def spsa(prediction, logits, x, curr_sample, curr_target, p_t, dim):
     grad_est = np.zeros((BATCH_SIZE, IMAGE_ROWS, IMAGE_COLS,
                          NUM_CHANNELS))
-    logits_np = sess.run(logits, feed_dict={x: curr_sample})
+    # logits_np = sess.run(logits, feed_dict={x: curr_sample})
+    prediction_np = sess.run(prediction, feed_dict={x: curr_sample})
+    if args.round_counter:
+        prediction_np = round_array(prediction_np, ROUND_PARAM)
+    logits_np = np.log(prediction_np)
+
     perturb_vec = np.random.normal(size=dim*BATCH_SIZE).reshape((BATCH_SIZE, dim))
     for i in range(BATCH_SIZE):
         perturb_vec[i,:] = perturb_vec[i,:]/np.linalg.norm(perturb_vec[i,:])
@@ -139,7 +170,7 @@ def spsa(prediction, logits, x, curr_sample, curr_target, p_t, dim):
     x_minus_i = np.clip(curr_sample - args.delta * perturb_vec, CLIP_MIN, CLIP_MAX)
 
     if args.loss_type == 'cw':
-        logit_t_grad_est, logit_max_grad_est = CW_est(logits, x, x_plus_i,
+        logit_t_grad_est, logit_max_grad_est = CW_est(prediction, logits, x, x_plus_i,
                                         x_minus_i, curr_sample, curr_target)
         if '_un' in args.method:
             single_grad_est = logit_t_grad_est - logit_max_grad_est
@@ -158,7 +189,13 @@ def spsa(prediction, logits, x, curr_sample, curr_target, p_t, dim):
 
 def finite_diff_method(prediction, logits, x, curr_sample, curr_target, p_t, dim, U=None):
     grad_est = np.zeros((BATCH_SIZE, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
-    logits_np = sess.run(logits, feed_dict={x: curr_sample})
+    # logits_np = sess.run(logits, feed_dict={x: curr_sample})
+    prediction_np = sess.run(prediction, feed_dict={x: curr_sample})
+    if args.round_counter:
+        prediction_np = round_array(prediction_np, ROUND_PARAM)
+    logits_np = ma.log(prediction_np)
+    logits_np  = logits_np.filled(0)
+    
     if PCA_FLAG == False:
         random_indices = np.random.permutation(dim)
         num_groups = dim / args.group_size
@@ -188,6 +225,7 @@ def finite_diff_method(prediction, logits, x, curr_sample, curr_target, p_t, dim
             grad_est += basis_vec*single_grad_est[:,None,None,None]
 
     # Getting gradient of the loss
+    # print(grad_est)
     loss_grad = loss_grad_fn(grad_est, p_t, logits_np, curr_target)
 
     return loss_grad
@@ -275,6 +313,7 @@ def estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logit
         eps_mod = eps - args.alpha
 
         for i in range(args.num_iter):
+            print("iteration no:. {}".format(i))
             curr_prediction = sess.run(prediction, feed_dict={x: curr_sample})
 
             p_t = curr_prediction[np.arange(BATCH_SIZE), list(curr_target)]
@@ -425,9 +464,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument("dataset", default='MNIST', help="dataset to be used")
 parser.add_argument("target_model", help="target model for attack")
 parser.add_argument("--img_source", help="source of images",
-                    default='test_orig.npy')
+                    default='cifar10_data/test_orig.npy')
 parser.add_argument("--label_source", help="source of labels",
-                    default='test_labels.npy')
+                    default='cifar10_data/test_labels.npy')
 parser.add_argument("--method", choices=['query_based', 'spsa_iter',
                     'query_based_un', 'spsa_un_iter', 'one_shot_un','query_based_un_iter','query_based_iter'], default='query_based_un')
 parser.add_argument("--delta", type=float, default=0.01,
@@ -446,8 +485,10 @@ parser.add_argument("--num_comp", type=int, default=None,
                         help="Number of pca components")
 parser.add_argument("--num_iter", type=int, default=4000,
                         help="Number of iterations")
-parser.add_argument("--beta", type=int, default=0.001,
+parser.add_argument("--beta", type=float, default=0.001,
                         help="Step size per iteration")
+parser.add_argument("--noise_counter", action='store_true')
+parser.add_argument("--round_counter", action='store_true')
 
 args = parser.parse_args()
 
@@ -531,7 +572,7 @@ Y_test_uncat = np.argmax(Y_test,axis=1)
 
 if args.dataset == 'CIFAR-10':
     # target model for crafting adversarial examples
-    target_model = models.load_model('logs/'+target_model_name, BATCH_SIZE, x, y)
+    target_model = cifar10_models.load_model('logs/'+target_model_name, BATCH_SIZE, x, y)
 
     logits = target_model.get_logits()
     prediction = tf.nn.softmax(logits)
