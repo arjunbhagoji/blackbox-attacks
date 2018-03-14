@@ -3,17 +3,25 @@ import tensorflow as tf
 import keras.backend as K
 import cPickle as pickle
 import os
+import pdb
+
 from mnist import data_mnist, load_model
 import cifar10_models
+from imagenet_utils import load_images
 from tf_utils import tf_test_error_rate, batch_eval
 from keras.utils import np_utils
 from attack_utils import gen_grad
+
 import time
 from os.path import basename
 from numpy import ma
 
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
+
+from tensorflow.contrib.slim.nets import inception
+
+slim = tf.contrib.slim
 
 RANDOM = True
 BATCH_SIZE = 100
@@ -99,24 +107,7 @@ def CW_est(prediction, logits, x, x_plus_i, x_minus_i, curr_sample, curr_target)
     return logit_t_grad_est/2.0, logit_max_grad_est/2.0
 
 def overall_grad_est(j, logits, prediction, x, curr_sample, curr_target, 
-                        p_t, random_indices, num_groups, U=None):
-    basis_vec = np.zeros((BATCH_SIZE, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
-
-    if PCA_FLAG == False:
-        if j != num_groups-1:
-            curr_indices = random_indices[j*args.group_size:(j+1)*args.group_size]
-        elif j == num_groups-1:
-            curr_indices = random_indices[j*args.group_size:]
-        per_c_indices = curr_indices%(IMAGE_COLS*IMAGE_ROWS)
-        channel = curr_indices/(IMAGE_COLS*IMAGE_ROWS)
-        row = per_c_indices/IMAGE_COLS
-        col = per_c_indices % IMAGE_COLS
-        for i in range(len(curr_indices)):
-            basis_vec[:, row[i], col[i]] = 1.
-
-    elif PCA_FLAG == True:
-        basis_vec[:] = U[:,j].reshape((1, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
-        # basis_vec = np.sign(basis_vec)
+                        p_t, random_indices, num_groups, basis_vec, U=None):
 
     x_plus_i = np.clip(curr_sample + args.delta * basis_vec, CLIP_MIN, CLIP_MAX)
     x_minus_i = np.clip(curr_sample - args.delta * basis_vec, CLIP_MIN, CLIP_MAX)
@@ -201,11 +192,11 @@ def finite_diff_method(prediction, logits, x, curr_sample, curr_target, p_t, dim
         num_groups = dim / args.group_size
     elif PCA_FLAG == True:
         num_groups = args.num_comp
+        random_indices = None
     for j in range(num_groups):
         if j%100==0:
             print('Group no.:{}'.format(j))
-        single_grad_est = overall_grad_est(j, logits, prediction, x, curr_sample, curr_target, 
-                        p_t, random_indices, num_groups, U)
+        basis_vec = np.zeros((BATCH_SIZE, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
 
         if PCA_FLAG == False:
             if j != num_groups-1:
@@ -216,12 +207,19 @@ def finite_diff_method(prediction, logits, x, curr_sample, curr_target, p_t, dim
             channel = curr_indices/(IMAGE_COLS*IMAGE_ROWS)
             row = per_c_indices/IMAGE_COLS
             col = per_c_indices % IMAGE_COLS
-            for i in range(len(curr_indices)):
-                grad_est[:, row[i], col[i]] = single_grad_est.reshape((BATCH_SIZE,1))
+            basis_vec[:, row, col, channel] = 1
+
+            single_grad_est = overall_grad_est(j, logits, prediction, x, curr_sample, curr_target, 
+                        p_t, random_indices, num_groups, basis_vec, U)
+            # for i in range(len(curr_indices)):
+            #     grad_est[:, row[i], col[i],channel[i]] = single_grad_est
+            grad_est[:, row, col,channel] = single_grad_est.reshape((BATCH_SIZE,1))
 
         elif PCA_FLAG == True:
             basis_vec = np.zeros((BATCH_SIZE, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
             basis_vec[:] = U[:,j].reshape((1, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
+            single_grad_est = overall_grad_est(j, logits, prediction, x, curr_sample, curr_target, 
+                        p_t, random_indices, num_groups, basis_vec, U)
             grad_est += basis_vec*single_grad_est[:,None,None,None]
 
     # Getting gradient of the loss
@@ -238,6 +236,7 @@ def estimated_grad_attack(X_test, X_test_ini, x, targets, prediction, logits, ep
     U = None
     if PCA_FLAG == True:
         U = pca_components(X_test, dim)
+        print U.shape
     for i in range(BATCH_EVAL_NUM):
         if i % 10 ==0:
             print('{}, {}'.format(i, eps))
@@ -303,6 +302,7 @@ def estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logit
 
     if PCA_FLAG == True:
         U = pca_components(X_test, dim)
+        print U.shape
     for i in range(BATCH_EVAL_NUM):
         if i % 10 ==0:
             print('{}, {}'.format(i, eps))
@@ -371,7 +371,7 @@ def estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logit
     return
 
 
-def white_box_fgsm(prediction, target_model, x, logits, y, X_test, X_test_ini, 
+def white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini, 
                                 Y_test, targets, targets_cat, eps, dim, beta=None):
 
     #Get gradient from model
@@ -410,6 +410,7 @@ def white_box_fgsm(prediction, target_model, x, logits, y, X_test, X_test_ini,
     adv_x_t = tf.clip_by_value(adv_x_t, CLIP_MIN, CLIP_MAX)
 
     Y_test_mod = Y_test[:BATCH_SIZE*BATCH_EVAL_NUM]
+    # Y_test_mod = Y_test
 
     X_adv_t = np.zeros_like(X_test)
     adv_pred_np = np.zeros((len(X_test), NUM_CLASSES))
@@ -449,15 +450,36 @@ def white_box_fgsm(prediction, target_model, x, logits, y, X_test, X_test_ini,
     white_box_success = 100.0 * np.sum(np.argmax(adv_pred_np, 1) == targets)/(BATCH_SIZE*BATCH_EVAL_NUM)
     if '_un' in args.method:
         white_box_success = 100.0 - white_box_success
+
     benign_success = 100.0 * np.sum(np.argmax(pred_np, 1) == Y_test_mod)/(BATCH_SIZE*BATCH_EVAL_NUM)
     print('Benign success: {}'.format(benign_success))
 
     wb_norm = np.mean(np.linalg.norm((X_adv_t-X_test_ini).reshape(BATCH_SIZE*BATCH_EVAL_NUM, dim), axis=1))
     print('Average white-box l2 perturbation: {}'.format(wb_norm))
 
+    # print(np.argmax(adv_pred_np)
+
     wb_write_out(eps, white_box_success, wb_norm)
 
     return
+
+def benign_calc(prediction, x, X_test, X_test_ini, Y_test):
+    # Y_test_mod = Y_test[:BATCH_SIZE*BATCH_EVAL_NUM]
+    Y_test_mod = Y_test
+    pred_np = np.zeros((len(X_test), NUM_CLASSES))
+
+    for i in range(BATCH_EVAL_NUM):
+        X_test_slice = X_test[i*BATCH_SIZE:(i+1)*BATCH_SIZE]
+        pred_np_i = sess.run(prediction, feed_dict={x: X_test_slice})
+        pred_np[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:] = pred_np_i
+    
+    benign_success = 100.0 * np.sum(np.argmax(pred_np, 1) == Y_test_mod)/(BATCH_SIZE*BATCH_EVAL_NUM)
+    print Y_test_mod
+    print(np.argmax(pred_np, 1))
+    print('Benign success: {}'.format(benign_success))
+
+    return
+    
 
 import argparse
 parser = argparse.ArgumentParser()
@@ -483,9 +505,9 @@ parser.add_argument("--group_size", type=int, default=1,
                         help="Number of features to group together")
 parser.add_argument("--num_comp", type=int, default=None,
                         help="Number of pca components")
-parser.add_argument("--num_iter", type=int, default=4000,
+parser.add_argument("--num_iter", type=int, default=40,
                         help="Number of iterations")
-parser.add_argument("--beta", type=float, default=0.001,
+parser.add_argument("--beta", type=float, default=0.01,
                         help="Step size per iteration")
 parser.add_argument("--noise_counter", action='store_true')
 parser.add_argument("--round_counter", action='store_true')
@@ -499,7 +521,7 @@ if args.num_comp is not None:
     PCA_FLAG=True
 
 if '_iter' in args.method:
-    BATCH_EVAL_NUM = 1
+    BATCH_EVAL_NUM = 10
 else:
     BATCH_EVAL_NUM = 1
 
@@ -509,6 +531,7 @@ if args.dataset == 'MNIST':
     target_model_name = basename(args.target_model)
     
     _, _, X_test_ini, Y_test = data_mnist()
+    X_test = X_test_ini
     print('Loaded data')
 
     IMAGE_ROWS = 28
@@ -533,6 +556,7 @@ elif args.dataset == 'CIFAR-10':
     target_model_name = args.target_model
     X_test_ini = np.load(args.img_source)
     Y_test = np.load(args.label_source)
+    X_test = X_test_ini
     print('Loaded data')
 
     IMAGE_ROWS = 32
@@ -553,6 +577,35 @@ elif args.dataset == 'CIFAR-10':
         eps_list.extend(np.linspace(2.5, 9.0, 14))
         # eps_list = [5.0]
     print eps_list
+elif args.dataset == 'Imagenet':
+
+    target_model_name = args.target_model
+
+    IMAGE_ROWS = 299
+    IMAGE_COLS = 299
+    NUM_CHANNELS = 3
+    NUM_CLASSES = 1001
+
+    batch_shape = [BATCH_SIZE, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS]
+
+    # pdb.set_trace()
+    X_test_ini = np.load('imagenet_x.npy')
+    X_test_ini = X_test_ini[0:1000]
+    X_test = X_test_ini
+    Y_test_uncat = np.load('imagenet_y.npy')
+    Y_test_uncat = Y_test_uncat[0:1000]
+    Y_test = np_utils.to_categorical(Y_test_uncat, NUM_CLASSES).astype(np.float32)
+
+    CLIP_MIN = -1.0
+    CLIP_MAX = 1.0
+
+    if args.norm == 'linf':
+        # eps_list = list(np.linspace(4.0, 32.0, 8))
+        eps_list = [16.0/ 255.0]
+        if "_iter" in args.method:
+            eps_list = [16.0/ 255.0]
+            args.beta = 2.0/255.0
+    # eps_list = 2.0 * eps_list / 255.0
 
 np.random.seed(0)
 tf.set_random_seed(0)
@@ -570,6 +623,9 @@ random_indices = np.random.choice(len(X_test_ini),BATCH_SIZE*BATCH_EVAL_NUM, rep
 Y_test = Y_test[random_indices]
 Y_test_uncat = np.argmax(Y_test,axis=1)
 
+X_test_ini = X_test_ini[random_indices]
+X_test = X_test[random_indices]
+
 if args.dataset == 'CIFAR-10':
     # target model for crafting adversarial examples
     target_model = cifar10_models.load_model('logs/'+target_model_name, BATCH_SIZE, x, y)
@@ -577,49 +633,81 @@ if args.dataset == 'CIFAR-10':
     logits = target_model.get_logits()
     prediction = tf.nn.softmax(logits)
 
-sess = tf.Session()
+
 if args.dataset == 'MNIST':
+    sess = tf.Session()
     K.set_session(sess)
     sess.run(tf.global_variables_initializer())
     target_model = load_model(args.target_model)
     logits = target_model(x)
     prediction = tf.nn.softmax(logits)
 elif args.dataset == 'CIFAR-10':
+    sess = tf.Session()
     target_model.load(sess)
+elif args.dataset == 'Imagenet':
+    with slim.arg_scope(inception.inception_v3_arg_scope()):
+        logits, end_points = inception.inception_v3(
+          x, num_classes=NUM_CLASSES, is_training=False,
+          reuse=None)
+        output = end_points['Predictions']
+
+        prediction = output.op.inputs[0]
+
+    sess = tf.Session()
+
+    saver = tf.train.Saver(slim.get_model_variables())
+    ckpt_state = tf.train.get_checkpoint_state('imagenet_models')
+    saver.restore(sess, 'imagenet_models/inception_v3.ckpt')
+
+    pred_np = np.zeros((len(X_test), NUM_CLASSES))
+
+    for i in range(BATCH_EVAL_NUM):
+        X_test_slice = X_test[i*(BATCH_SIZE):(i+1)*(BATCH_SIZE)]
+        pred_np_i = sess.run(prediction, feed_dict={x: X_test_slice})
+        pred_np[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:] = pred_np_i
+    benign_success = 100.0 * np.sum(np.argmax(pred_np, 1) == Y_test_uncat)/(BATCH_SIZE*BATCH_EVAL_NUM)
+    print('Benign success: {}'.format(benign_success))
+
 print('Creating session')
 
 if '_un' in args.method:
     targets = Y_test_uncat
-elif RANDOM is False:
-    targets = np.array([target]*(BATCH_SIZE*BATCH_EVAL_NUM))
-elif RANDOM is True:
-    targets = []
-    allowed_targets = list(range(NUM_CLASSES))
-    for i in range(BATCH_SIZE*BATCH_EVAL_NUM):
-        allowed_targets.remove(Y_test_uncat[i])
-        targets.append(np.random.choice(allowed_targets))
+else: 
+    # if args.dataset != 'Imagenet':
+    if RANDOM is False:
+        targets = np.array([target]*(BATCH_SIZE*BATCH_EVAL_NUM))
+    elif RANDOM is True:
+        targets = []
         allowed_targets = list(range(NUM_CLASSES))
-    targets = np.array(targets)
+        for i in range(BATCH_SIZE*BATCH_EVAL_NUM):
+            allowed_targets.remove(Y_test_uncat[i])
+            targets.append(np.random.choice(allowed_targets))
+            allowed_targets = list(range(NUM_CLASSES))
+        targets = np.array(targets)
+    # elif args.dataset == 'Imagenet':
+    #     targets = np.load('imagenet_t.npy')
+    #     targets = targets[0:1000]
+
 targets_cat = np_utils.to_categorical(targets, NUM_CLASSES).astype(np.float32)
 
-random_perturb = np.random.randn(*X_test_ini.shape)
+# random_perturb = np.random.randn(*X_test_ini.shape)
 
-if args.norm == 'linf':
-    random_perturb_signed = np.sign(random_perturb)
-    X_test = np.clip(X_test_ini + args.alpha * random_perturb_signed, CLIP_MIN, CLIP_MAX)
-elif args.norm == 'l2':
-    random_perturb_unit = random_perturb/np.linalg.norm(random_perturb.reshape(curr_len,dim), axis=1)[:, None, None, None]
-    X_test = np.clip(X_test_ini + args.alpha * random_perturb_unit, CLIP_MIN, CLIP_MAX)
+# if args.norm == 'linf':
+#     random_perturb_signed = np.sign(random_perturb)
+#     X_test = np.clip(X_test_ini + args.alpha * random_perturb_signed, CLIP_MIN, CLIP_MAX)
+# elif args.norm == 'l2':
+#     random_perturb_unit = random_perturb/np.linalg.norm(random_perturb.reshape(curr_len,dim), axis=1)[:, None, None, None]
+#     X_test = np.clip(X_test_ini + args.alpha * random_perturb_unit, CLIP_MIN, CLIP_MAX)
 
-X_test_ini = X_test_ini[random_indices]
-X_test = X_test[random_indices]
+
+# benign_calc(prediction, x, logits, X_test, X_test_ini, Y_test_uncat)
 
 for eps in eps_list:
     if '_iter' in args.method:
-        white_box_fgsm(prediction, target_model, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets, targets_cat, eps, dim, args.beta)
+        white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets, targets_cat, eps, dim, args.beta)
         estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logits, eps, dim, args.beta)
     else:
-        white_box_fgsm(prediction, target_model, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets,
+        white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets,
                     targets_cat, eps, dim)
 
         estimated_grad_attack(X_test, X_test_ini, x, targets, prediction, logits, eps, dim)

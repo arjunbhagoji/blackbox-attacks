@@ -17,14 +17,14 @@ from tensorflow.python.platform import flags
 FLAGS = flags.FLAGS
 
 BATCH_SIZE = 100
-BATCH_EVAL_NUM = 10
+BATCH_EVAL_NUM = 100
 
 # PSO parameters
 swarmsize = 100
 maxiter = 100
 omega = 0.5
-p_wt = 0.5
-s_wt = 0.5
+p_wt = 0.3
+s_wt = 0.7
 
 
 parser = argparse.ArgumentParser()
@@ -82,27 +82,13 @@ def loss(X):
     elif max_conf_i != curr_target:
         return -1.0 * max_conf
 
-def logit_loss(X):
-    X = X.reshape((1, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, FLAGS.NUM_CHANNELS))
-    confidence = K.get_session().run([prediction], feed_dict={x: X, K.learning_phase(): 0})[0]
-    # confidence[:,curr_target] = 1e-4
-    logits = np.log(confidence)
-
-    logit_t = logits[:, curr_target]
-    logits[:, curr_target] = 1e-4
-    max_logit_i = np.argmax(logits, 1)
-    logit_max = logits[:, max_logit_i]
-    return logit_t - logit_max
-
-
 success = 0
 adv_conf_avg = 0.0
-sample_num = 10
+sample_num = 1000
 
 ofile = open('output_data/pso_adv_success.txt', 'a')
 
 time1 = time.time()
-perturbation = 0.0
 for i in range(sample_num):
     print(i)
     X_ini = X_test[i].reshape(dim)
@@ -113,9 +99,7 @@ for i in range(sample_num):
     lower_bound = np.clip(X_ini - eps * ones_vec, 0, 1)
     upper_bound = np.clip(X_ini + eps * ones_vec, 0 ,1)
 
-    Xopt, fopt = pso(logit_loss, lower_bound, upper_bound, swarmsize = 100, maxiter=100, debug = False)
-
-    perturbation += np.linalg.norm(X_ini - Xopt)
+    Xopt, fopt = pso(loss, lower_bound, upper_bound, swarmsize = 100, maxiter=100, debug = False)
 
     Xopt = Xopt.reshape((1, FLAGS.IMAGE_ROWS, FLAGS.IMAGE_COLS, FLAGS.NUM_CHANNELS))
     adv_pred_np = K.get_session().run([prediction], feed_dict={x: Xopt, K.learning_phase(): 0})[0]
@@ -133,11 +117,9 @@ for i in range(sample_num):
 
     # print(fopt, adv_conf[0])
 time2 = time.time()
-perturbation = perturbation / sample_num
 ofile.write('PSO params: swarmsize {}, maxiter {}, omega {}, p_wt {}, s_wt {} \n'
 .format(swarmsize, maxiter, omega, p_wt, s_wt))
 adv_conf_avg = adv_conf_avg/success
-ofile.write('{}, {}: {} of {}, {} \n'.format(target_model_name, eps, success, sample_num, adv_conf_avg, perturbation))
+ofile.write('{}, {}: {} of {}, {} \n'.format(target_model_name, eps, success, sample_num, adv_conf_avg))
 print(success)
-print(perturbation)
 print('{:.2f}'.format((time2-time1)/sample_num))
