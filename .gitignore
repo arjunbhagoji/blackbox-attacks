@@ -12,10 +12,11 @@ logs/
 clarifai/clarifai_images/*
 mnist_models/
 output_data/*
-paper_images/
-*.png
+# paper_images/
+# *.png
 *.jpg
 *.csv
 *sh
 imagenet_models/
 .gitignore
+imagenet_data/

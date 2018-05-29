@@ -11,6 +11,7 @@ from imagenet_utils import load_images
 from tf_utils import tf_test_error_rate, batch_eval
 from keras.utils import np_utils
 from attack_utils import gen_grad
+from matplotlib import image as img
 
 import time
 from os.path import basename
@@ -18,16 +19,33 @@ from numpy import ma
 
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
+from pyswarm import pso
 
 from tensorflow.contrib.slim.nets import inception
 
 slim = tf.contrib.slim
 
 RANDOM = True
-BATCH_SIZE = 100
+BATCH_SIZE = 1
 ROUND_PARAM = 100.0
 
 K.set_learning_phase(0)
+
+def est_img_save(i, adv_prediction, curr_target, eps, x_adv):
+    img_count = 0
+    if i==0:
+        for k in range(1):
+            adv_label = np.argmax(adv_prediction[k].reshape(1, NUM_CLASSES),1)
+            if adv_label[0] == curr_target[k]:
+                img.imsave('paper_images/'+args.method+'_'+args.norm+'_'+args.loss_type+
+                                '_{}_{}_{}_{}_{}_{}_{}.png'.format(target_model_name,
+                                adv_label, curr_target[k], eps, args.delta, args.alpha,
+                                args.num_comp),
+                    x_adv[k].reshape(IMAGE_ROWS, IMAGE_COLS)*255, cmap='gray')
+                img_count += 1
+            if img_count >= 10:
+                return
+    return
 
 def wb_write_out(eps, white_box_success, wb_norm):
     if RANDOM is False:
@@ -60,15 +78,22 @@ def round_array(array, divider):
 
     return array
 
+# def noise_add(array):
+
+
 
 def xent_est(prediction, x, x_plus_i, x_minus_i, curr_target):
     pred_plus = sess.run(prediction, feed_dict={x: x_plus_i})
     if args.round_counter:
         pred_plus = round_array(pred_plus, ROUND_PARAM)
+    elif args.noise_counter:
+        pred_plus = noise_add(pred_plus)
     pred_plus_t = pred_plus[np.arange(BATCH_SIZE), list(curr_target)]
     pred_minus = sess.run(prediction, feed_dict={x: x_minus_i})
     if args.round_counter:
         pred_minus = round_array(pred_minus, ROUND_PARAM)
+    elif args.noise_counter:
+        pred_minus = noise_add(pred_minus)
     pred_minus_t = pred_minus[np.arange(BATCH_SIZE), list(curr_target)]
     single_grad_est = (pred_plus_t - pred_minus_t)/args.delta
 
@@ -79,6 +104,8 @@ def CW_est(prediction, logits, x, x_plus_i, x_minus_i, curr_sample, curr_target)
     curr_prediction = sess.run(prediction, feed_dict={x: curr_sample})
     if args.round_counter:
         curr_prediction = round_array(curr_prediction, ROUND_PARAM)
+    elif args.noise_counter:
+        curr_prediction = noise_add(curr_prediction)
     curr_logits = (ma.log(curr_prediction)).filled(0)
     # So that when max is taken, it returns max among classes apart from the
     # target
@@ -89,6 +116,8 @@ def CW_est(prediction, logits, x, x_plus_i, x_minus_i, curr_sample, curr_target)
     prediction_plus = sess.run(prediction, feed_dict={x: x_plus_i})
     if args.round_counter:
         prediction_plus = round_array(prediction_plus, ROUND_PARAM)
+    elif args.noise_counter:
+        prediction_plus = noise_add(prediction_plus)
     logit_plus = (ma.log(prediction_plus)).filled(0)
     logit_plus_t = logit_plus[np.arange(BATCH_SIZE), list(curr_target)]
     logit_plus_max = logit_plus[np.arange(BATCH_SIZE), list(max_indices)]
@@ -96,6 +125,8 @@ def CW_est(prediction, logits, x, x_plus_i, x_minus_i, curr_sample, curr_target)
     prediction_minus = sess.run(prediction, feed_dict={x: x_minus_i})
     if args.round_counter:
         prediction_minus = round_array(prediction_minus, ROUND_PARAM)
+    elif args.noise_counter:
+        prediction_minus = noise_add(prediction_minus)
     logit_minus = (ma.log(prediction_minus)).filled(0)
     # logit_minus = sess.run(logits, feed_dict={x: x_minus_i})
     logit_minus_t = logit_minus[np.arange(BATCH_SIZE), list(curr_target)]
@@ -184,6 +215,8 @@ def finite_diff_method(prediction, logits, x, curr_sample, curr_target, p_t, dim
     prediction_np = sess.run(prediction, feed_dict={x: curr_sample})
     if args.round_counter:
         prediction_np = round_array(prediction_np, ROUND_PARAM)
+    elif args.noise_counter:
+        prediction_np = noise_add(prediction_np)
     logits_np = ma.log(prediction_np)
     logits_np  = logits_np.filled(0)
     
@@ -287,6 +320,7 @@ def estimated_grad_attack(X_test, X_test_ini, x, targets, prediction, logits, ep
     avg_l2_perturb = avg_l2_perturb/BATCH_EVAL_NUM
 
     est_write_out(eps, success, avg_l2_perturb)
+    est_img_save(i, adv_prediction, curr_target, eps, x_adv)
 
     time2 = time.time()
     print('Average l2 perturbation: {}'.format(avg_l2_perturb))
@@ -363,6 +397,7 @@ def estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logit
     avg_l2_perturb = avg_l2_perturb/BATCH_EVAL_NUM
 
     est_write_out(eps, success, avg_l2_perturb)
+    est_img_save(i, adv_prediction, curr_target, eps, x_adv)
 
     time2 = time.time()
     print('Average l2 perturbation: {}'.format(avg_l2_perturb))
@@ -479,6 +514,65 @@ def benign_calc(prediction, x, X_test, X_test_ini, Y_test):
     print('Benign success: {}'.format(benign_success))
 
     return
+
+def particle_swarm_attack(prediction, x, X_test, eps, targets):
+    # PSO parameters
+    swarmsize = 100
+    maxiter = 77
+    omega = 0.5
+    p_wt = 0.5
+    s_wt = 0.5
+
+    def loss(X):
+        X = X.reshape((1, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
+        confidence = sess.run([prediction], feed_dict={x: X})[0]
+        # confidence[:,curr_target] = 1e-4
+        max_conf_i = np.argmax(confidence, 1)[0]
+        max_conf = np.max(confidence, 1)[0]
+        if max_conf_i == curr_target:
+            return max_conf
+        elif max_conf_i != curr_target:
+            return -1.0 * max_conf
+
+    success = 0
+    adv_conf_avg = 0.0
+    distortion = 0.0
+    sample_num = 10
+
+    ofile = open('pso_adv_success.txt', 'a')
+
+    time1 = time.time()
+    for i in range(sample_num):
+        print(i)
+        X_ini = X_test[i].reshape(dim)
+        curr_target = targets[i]
+
+        ones_vec = np.ones_like(X_ini)
+
+        lower_bound = np.clip(X_ini - eps * ones_vec, CLIP_MIN, CLIP_MAX)
+        upper_bound = np.clip(X_ini + eps * ones_vec, CLIP_MIN, CLIP_MAX)
+
+        Xopt, fopt = pso(loss, lower_bound, upper_bound, swarmsize = swarmsize, maxiter=maxiter, debug = False)
+
+        print('PSO finished')
+
+        Xopt = Xopt.reshape((1, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS))
+        adv_pred_np = sess.run([prediction], feed_dict={x: Xopt})[0]
+        adv_label = np.argmax(adv_pred_np, 1)[0]
+        adv_conf = np.max(adv_pred_np, 1)
+        distortion += np.linalg.norm((Xopt-X_test[i]).reshape(dim))
+        if adv_label!=curr_target:
+            success += 1
+            adv_conf_avg += adv_conf[0]
+
+    # print(fopt, adv_conf[0])
+    time2 = time.time()
+    ofile.write('PSO params: swarmsize {}, maxiter {}, omega {}, p_wt {}, s_wt {} \n'
+    .format(swarmsize, maxiter, omega, p_wt, s_wt))
+    adv_conf_avg = adv_conf_avg/success
+    ofile.write('{}, {}: {} of {}, {} \n'.format(target_model_name, eps, success, sample_num, adv_conf_avg))
+    print('{} {}'.format(success, distortion/sample_num))
+    print('{:.2f}'.format((time2-time1)/sample_num))
     
 
 import argparse
@@ -490,7 +584,7 @@ parser.add_argument("--img_source", help="source of images",
 parser.add_argument("--label_source", help="source of labels",
                     default='cifar10_data/test_labels.npy')
 parser.add_argument("--method", choices=['query_based', 'spsa_iter',
-                    'query_based_un', 'spsa_un_iter', 'one_shot_un','query_based_un_iter','query_based_iter'], default='query_based_un')
+                    'query_based_un', 'spsa_un_iter', 'one_shot_un','query_based_un_iter','query_based_iter', 'pso'], default='query_based')
 parser.add_argument("--delta", type=float, default=0.01,
                     help="local perturbation")
 parser.add_argument("--norm", type=str, default='linf',
@@ -521,7 +615,7 @@ if args.num_comp is not None:
     PCA_FLAG=True
 
 if '_iter' in args.method:
-    BATCH_EVAL_NUM = 10
+    BATCH_EVAL_NUM = 1
 else:
     BATCH_EVAL_NUM = 1
 
@@ -610,10 +704,16 @@ elif args.dataset == 'Imagenet':
 np.random.seed(0)
 tf.set_random_seed(0)
 
-x = tf.placeholder(shape=(BATCH_SIZE,
-                   IMAGE_ROWS,
-                   IMAGE_COLS,
-                   NUM_CHANNELS),dtype=tf.float32)
+if 'pso' not in args.method:
+    x = tf.placeholder(shape=(BATCH_SIZE,
+                       IMAGE_ROWS,
+                       IMAGE_COLS,
+                       NUM_CHANNELS),dtype=tf.float32)
+else:
+    x = tf.placeholder(shape=(1,
+                       IMAGE_ROWS,
+                       IMAGE_COLS,
+                       NUM_CHANNELS),dtype=tf.float32)
 
 y = tf.placeholder(shape=(BATCH_SIZE, NUM_CLASSES),dtype=tf.float32)
 
@@ -703,7 +803,9 @@ targets_cat = np_utils.to_categorical(targets, NUM_CLASSES).astype(np.float32)
 # benign_calc(prediction, x, logits, X_test, X_test_ini, Y_test_uncat)
 
 for eps in eps_list:
-    if '_iter' in args.method:
+    if 'pso' in args.method:
+        particle_swarm_attack(prediction, x, X_test, eps, targets)
+    elif '_iter' in args.method:
         white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets, targets_cat, eps, dim, args.beta)
         estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logits, eps, dim, args.beta)
     else:
