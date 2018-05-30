@@ -108,7 +108,7 @@ def finite_diff_method(curr_sample, curr_target, p_t, max_index, U=None):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("target_image_name", help="Image to misclassify")
-parser.add_argument("--target_model", type=str, default='moderation', 
+parser.add_argument("--target_model", type=str, default='nsfw-v1.0', 
                     help="target model for attack")
 parser.add_argument("--eps", type=int, default=16, 
                     help="perturbation magnitude to use")
