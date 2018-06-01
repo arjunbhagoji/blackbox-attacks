@@ -31,20 +31,24 @@ ROUND_PARAM = 100.0
 
 K.set_learning_phase(0)
 
-def est_img_save(i, adv_prediction, curr_target, eps, x_adv):
+def wb_img_save(x_adv):
+    img.imsave('paper_images/'+'wb_trial_2.png',
+        (x_adv[0]/255).reshape(IMAGE_ROWS, IMAGE_COLS,NUM_CHANNELS))
+    return
+
+def est_img_save(adv_prediction, curr_target, eps, x_adv):
     img_count = 0
-    if i==0:
-        for k in range(1):
-            adv_label = np.argmax(adv_prediction[k].reshape(1, NUM_CLASSES),1)
-            if adv_label[0] == curr_target[k]:
-                img.imsave('paper_images/'+args.method+'_'+args.norm+'_'+args.loss_type+
-                                '_{}_{}_{}_{}_{}_{}_{}.png'.format(target_model_name,
-                                adv_label, curr_target[k], eps, args.delta, args.alpha,
-                                args.num_comp),
-                    x_adv[k].reshape(IMAGE_ROWS, IMAGE_COLS)*255, cmap='gray')
-                img_count += 1
-            if img_count >= 10:
-                return
+    for k in range(1):
+        adv_label = np.argmax(adv_prediction[k].reshape(1, NUM_CLASSES),1)
+        # if adv_label[0] == curr_target[k]:
+        img.imsave('paper_images/'+args.method+'_'+args.norm+'_'+args.loss_type+
+                        '_{}_{}_{}_{}_{}_{}_{}.png'.format(target_model_name,
+                        adv_label, curr_target[k], eps, args.delta, args.alpha,
+                        args.num_comp),
+            (x_adv[k]/255).reshape(IMAGE_ROWS, IMAGE_COLS,NUM_CHANNELS))
+        img_count += 1
+        if img_count >= 10:
+            return
     return
 
 def wb_write_out(eps, white_box_success, wb_norm):
@@ -320,7 +324,7 @@ def estimated_grad_attack(X_test, X_test_ini, x, targets, prediction, logits, ep
     avg_l2_perturb = avg_l2_perturb/BATCH_EVAL_NUM
 
     est_write_out(eps, success, avg_l2_perturb)
-    est_img_save(i, adv_prediction, curr_target, eps, x_adv)
+    est_img_save(adv_prediction, curr_target, eps, x_adv)
 
     time2 = time.time()
     print('Average l2 perturbation: {}'.format(avg_l2_perturb))
@@ -397,7 +401,7 @@ def estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logit
     avg_l2_perturb = avg_l2_perturb/BATCH_EVAL_NUM
 
     est_write_out(eps, success, avg_l2_perturb)
-    est_img_save(i, adv_prediction, curr_target, eps, x_adv)
+    est_img_save(adv_prediction, curr_target, eps, x_adv)
 
     time2 = time.time()
     print('Average l2 perturbation: {}'.format(avg_l2_perturb))
@@ -495,6 +499,7 @@ def white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini,
     # print(np.argmax(adv_pred_np)
 
     wb_write_out(eps, white_box_success, wb_norm)
+    # wb_img_save(X_adv_t)
 
     return
 
@@ -599,7 +604,7 @@ parser.add_argument("--group_size", type=int, default=1,
                         help="Number of features to group together")
 parser.add_argument("--num_comp", type=int, default=None,
                         help="Number of pca components")
-parser.add_argument("--num_iter", type=int, default=40,
+parser.add_argument("--num_iter", type=int, default=10,
                         help="Number of iterations")
 parser.add_argument("--beta", type=float, default=0.01,
                         help="Step size per iteration")
@@ -636,11 +641,13 @@ if args.dataset == 'MNIST':
     CLIP_MAX = 1.0
 
     if args.norm == 'linf':
-        # eps_list = list(np.linspace(0.025, 0.1, 4))
-        # eps_list.extend(np.linspace(0.15, 0.5, 8))
-        eps_list = [0.3]
+        eps_list = list(np.linspace(0.0, 0.1, 3))
+        eps_list.extend(np.linspace(0.1, 0.5, 9))
+        # eps_list = [0.3]
         if "_iter" in args.method:
-            eps_list = [0.3]
+            # eps_list = [0.3]
+            # eps_list = list(np.linspace(0.0, 0.1, 3))
+            eps_list.extend(np.linspace(0.0, 0.5, 11))
     elif args.norm == 'l2':
         eps_list = list(np.linspace(0.0, 2.0, 5))
         eps_list.extend(np.linspace(2.5, 9.0, 14))
@@ -661,11 +668,11 @@ elif args.dataset == 'CIFAR-10':
     CLIP_MAX = 255.0
 
     if args.norm == 'linf':
-        # eps_list = list(np.linspace(4.0, 32.0, 8))
-        eps_list = [8.0]
+        eps_list = list(np.linspace(4.0, 32.0, 8))
+        # eps_list = [16.0]
         if "_iter" in args.method:
-            eps_list = [8.0]
-        # eps_list = list(np.linspace(4.0, 32.0, 8))
+            # eps_list = [8.0]
+            eps_list = list(np.linspace(4.0, 32.0, 8))
     elif args.norm == 'l2':
         eps_list = list(np.linspace(0.0, 2.0, 5))
         eps_list.extend(np.linspace(2.5, 9.0, 14))
@@ -806,6 +813,8 @@ for eps in eps_list:
     if 'pso' in args.method:
         particle_swarm_attack(prediction, x, X_test, eps, targets)
     elif '_iter' in args.method:
+        args.beta = (eps*1.25)/args.num_iter
+        print(args.beta)
         white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets, targets_cat, eps, dim, args.beta)
         estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logits, eps, dim, args.beta)
     else:
