@@ -19,15 +19,18 @@ from numpy import ma
 
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
-from pyswarm import pso
+# from pyswarm import pso
 
 from tensorflow.contrib.slim.nets import inception
 
 slim = tf.contrib.slim
 
 RANDOM = True
-BATCH_SIZE = 1
+BATCH_SIZE = 100
 ROUND_PARAM = 100.0
+
+model_dir = '../common_models/Imagenet'
+data_dir = '../common_data/Imagenet'
 
 K.set_learning_phase(0)
 
@@ -450,10 +453,12 @@ def white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini,
 
     Y_test_mod = Y_test[:BATCH_SIZE*BATCH_EVAL_NUM]
     # Y_test_mod = Y_test
+    X_test_ini_mod = X_test_ini[:BATCH_SIZE*BATCH_EVAL_NUM]
+    targets_mod = targets[:BATCH_SIZE*BATCH_EVAL_NUM]
 
-    X_adv_t = np.zeros_like(X_test)
-    adv_pred_np = np.zeros((len(X_test), NUM_CLASSES))
-    pred_np = np.zeros((len(X_test), NUM_CLASSES))
+    X_adv_t = np.zeros_like(X_test_ini_mod)
+    adv_pred_np = np.zeros((len(X_test_ini_mod), NUM_CLASSES))
+    pred_np = np.zeros((len(X_test_ini_mod), NUM_CLASSES))
 
     if '_iter' not in args.method:
         for i in range(BATCH_EVAL_NUM):
@@ -468,6 +473,7 @@ def white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini,
             adv_pred_np[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:] = adv_pred_np_i
     else:
         for i in range(BATCH_EVAL_NUM):
+            print i
             X_test_slice = X_test[i*(BATCH_SIZE):(i+1)*(BATCH_SIZE)]
             pred_np_i, logits_np_i = sess.run([prediction, logits], feed_dict={x: X_test_slice})
             pred_np[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:] = pred_np_i
@@ -485,20 +491,20 @@ def white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini,
             adv_pred_np_i = sess.run(prediction, feed_dict={x: X_adv_curr})
             adv_pred_np[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:] = adv_pred_np_i
 
-
-    white_box_success = 100.0 * np.sum(np.argmax(adv_pred_np, 1) == targets)/(BATCH_SIZE*BATCH_EVAL_NUM)
+    white_box_success = 100.0 * np.sum(np.argmax(adv_pred_np, 1) == targets_mod)/(BATCH_SIZE*BATCH_EVAL_NUM)
     if '_un' in args.method:
         white_box_success = 100.0 - white_box_success
 
     benign_success = 100.0 * np.sum(np.argmax(pred_np, 1) == Y_test_mod)/(BATCH_SIZE*BATCH_EVAL_NUM)
     print('Benign success: {}'.format(benign_success))
 
-    wb_norm = np.mean(np.linalg.norm((X_adv_t-X_test_ini).reshape(BATCH_SIZE*BATCH_EVAL_NUM, dim), axis=1))
+    wb_norm = np.mean(np.linalg.norm((X_adv_t-X_test_ini_mod).reshape(BATCH_SIZE*BATCH_EVAL_NUM, dim), axis=1))
     print('Average white-box l2 perturbation: {}'.format(wb_norm))
 
     # print(np.argmax(adv_pred_np)
 
     wb_write_out(eps, white_box_success, wb_norm)
+    np.save('../imagenet_x_adv.npy', X_adv_t)
     # wb_img_save(X_adv_t)
 
     return
@@ -582,14 +588,14 @@ def particle_swarm_attack(prediction, x, X_test, eps, targets):
 
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("dataset", default='MNIST', help="dataset to be used")
+parser.add_argument("dataset", default='Imagenet', help="dataset to be used")
 parser.add_argument("target_model", help="target model for attack")
 parser.add_argument("--img_source", help="source of images",
                     default='cifar10_data/test_orig.npy')
 parser.add_argument("--label_source", help="source of labels",
                     default='cifar10_data/test_labels.npy')
 parser.add_argument("--method", choices=['query_based', 'spsa_iter',
-                    'query_based_un', 'spsa_un_iter', 'one_shot_un','query_based_un_iter','query_based_iter', 'pso'], default='query_based')
+                    'query_based_un', 'spsa_un_iter', 'one_shot_un','query_based_un_iter','query_based_iter', 'pso'], default='query_based_iter')
 parser.add_argument("--delta", type=float, default=0.01,
                     help="local perturbation")
 parser.add_argument("--norm", type=str, default='linf',
@@ -620,7 +626,7 @@ if args.num_comp is not None:
     PCA_FLAG=True
 
 if '_iter' in args.method:
-    BATCH_EVAL_NUM = 1
+    BATCH_EVAL_NUM = 10
 else:
     BATCH_EVAL_NUM = 1
 
@@ -690,10 +696,10 @@ elif args.dataset == 'Imagenet':
     batch_shape = [BATCH_SIZE, IMAGE_ROWS, IMAGE_COLS, NUM_CHANNELS]
 
     # pdb.set_trace()
-    X_test_ini = np.load('imagenet_x.npy')
+    X_test_ini = np.load(os.path.join(data_dir,'imagenet_x.npy'))
     X_test_ini = X_test_ini[0:1000]
     X_test = X_test_ini
-    Y_test_uncat = np.load('imagenet_y.npy')
+    Y_test_uncat = np.load(os.path.join(data_dir,'imagenet_y.npy'))
     Y_test_uncat = Y_test_uncat[0:1000]
     Y_test = np_utils.to_categorical(Y_test_uncat, NUM_CLASSES).astype(np.float32)
 
@@ -726,12 +732,12 @@ y = tf.placeholder(shape=(BATCH_SIZE, NUM_CLASSES),dtype=tf.float32)
 
 dim = int(IMAGE_ROWS*IMAGE_COLS*NUM_CHANNELS)
 
-random_indices = np.random.choice(len(X_test_ini),BATCH_SIZE*BATCH_EVAL_NUM, replace=False)
-Y_test = Y_test[random_indices]
-Y_test_uncat = np.argmax(Y_test,axis=1)
+# random_indices = np.random.choice(len(X_test_ini),BATCH_SIZE*BATCH_EVAL_NUM, replace=False)
+# Y_test = Y_test[random_indices]
+# Y_test_uncat = np.argmax(Y_test,axis=1)
 
-X_test_ini = X_test_ini[random_indices]
-X_test = X_test[random_indices]
+# X_test_ini = X_test_ini[random_indices]
+# X_test = X_test[random_indices]
 
 if args.dataset == 'CIFAR-10':
     # target model for crafting adversarial examples
@@ -763,8 +769,8 @@ elif args.dataset == 'Imagenet':
     sess = tf.Session()
 
     saver = tf.train.Saver(slim.get_model_variables())
-    ckpt_state = tf.train.get_checkpoint_state('imagenet_models')
-    saver.restore(sess, 'imagenet_models/inception_v3.ckpt')
+    ckpt_state = tf.train.get_checkpoint_state(model_dir)
+    saver.restore(sess, os.path.join(model_dir,'inception_v3.ckpt'))
 
     pred_np = np.zeros((len(X_test), NUM_CLASSES))
 
@@ -780,20 +786,20 @@ print('Creating session')
 if '_un' in args.method:
     targets = Y_test_uncat
 else: 
-    # if args.dataset != 'Imagenet':
-    if RANDOM is False:
-        targets = np.array([target]*(BATCH_SIZE*BATCH_EVAL_NUM))
-    elif RANDOM is True:
-        targets = []
-        allowed_targets = list(range(NUM_CLASSES))
-        for i in range(BATCH_SIZE*BATCH_EVAL_NUM):
-            allowed_targets.remove(Y_test_uncat[i])
-            targets.append(np.random.choice(allowed_targets))
+    if args.dataset != 'Imagenet':
+        if RANDOM is False:
+            targets = np.array([target]*(BATCH_SIZE*BATCH_EVAL_NUM))
+        elif RANDOM is True:
+            targets = []
             allowed_targets = list(range(NUM_CLASSES))
-        targets = np.array(targets)
-    # elif args.dataset == 'Imagenet':
-    #     targets = np.load('imagenet_t.npy')
-    #     targets = targets[0:1000]
+            for i in range(BATCH_SIZE*BATCH_EVAL_NUM):
+                allowed_targets.remove(Y_test_uncat[i])
+                targets.append(np.random.choice(allowed_targets))
+                allowed_targets = list(range(NUM_CLASSES))
+            targets = np.array(targets)
+    elif args.dataset == 'Imagenet':
+        targets = np.load(os.path.join(data_dir,'imagenet_t.npy')).astype(int)
+        targets = targets[0:1000]
 
 targets_cat = np_utils.to_categorical(targets, NUM_CLASSES).astype(np.float32)
 
@@ -816,7 +822,7 @@ for eps in eps_list:
         args.beta = (eps*1.25)/args.num_iter
         print(args.beta)
         white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets, targets_cat, eps, dim, args.beta)
-        estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logits, eps, dim, args.beta)
+        # estimated_grad_attack_iter(X_test, X_test_ini, x, targets, prediction, logits, eps, dim, args.beta)
     else:
         white_box_fgsm(prediction, x, logits, y, X_test, X_test_ini, Y_test_uncat, targets,
                     targets_cat, eps, dim)
